@@ -556,6 +556,49 @@ def _extensions(span: JsonObject, attributes: JsonObject) -> JsonObject:
     return extensions
 
 
+def _envelope_trace_id(envelope: JsonObject) -> str | None:
+    """Read the trace identifier declared only at the envelope level.
+
+    Args:
+        envelope: MLflow trace envelope with ``info`` and ``data``.
+
+    Returns:
+        Declared envelope trace identifier, or ``None`` when absent.
+    """
+    info = envelope.get("info")
+    if isinstance(info, dict):
+        for key in ("trace_id", "traceId", "traceID", "request_id"):
+            value = info.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    for key in ("trace_id", "traceId", "traceID", "request_id"):
+        value = envelope.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _with_envelope_trace_id(span: JsonObject, envelope_trace_id: str | None) -> JsonObject:
+    """Return a span record that carries the envelope trace identifier when missing.
+
+    Args:
+        span: MLflow span record.
+        envelope_trace_id: Trace identifier declared only at the envelope level.
+
+    Returns:
+        Original span when it already carries a trace identifier or no envelope
+        identifier exists, otherwise a shallow copy with the envelope identifier.
+    """
+    if envelope_trace_id is None:
+        return span
+    if any(
+        key in span for key in ("trace_id", "traceId", "traceID", "request_id", "mlflow.traceId")
+    ):
+        return span
+    # Preserve original mapping; inject the envelope identifier as trace_id.
+    return {**span, "trace_id": envelope_trace_id}
+
+
 def _mlflow_records(payload: JsonValue) -> tuple[JsonObject, ...]:
     """Flatten MLflow export shapes, including trace envelopes with ``data.spans``.
 
@@ -569,6 +612,9 @@ def _mlflow_records(payload: JsonValue) -> tuple[JsonObject, ...]:
         VendorTraceFormatError: The payload is not a supported MLflow shape.
     """
     # Handle explicit trace envelope(s) where a trace has ``info`` + ``data.spans``.
+    # MLflow trace-search responses identify the trace only through ``info.trace_id``;
+    # child spans may not repeat that identifier. Preserve the envelope identity so
+    # every valid child span is retained.
     if isinstance(payload, dict) and "traces" in payload and isinstance(payload["traces"], list):
         records: list[JsonObject] = []
         for trace in payload["traces"]:
@@ -576,11 +622,11 @@ def _mlflow_records(payload: JsonValue) -> tuple[JsonObject, ...]:
                 raise VendorTraceFormatError("MLflow trace envelope must be an object")
             data = trace.get("data")
             if isinstance(data, dict) and isinstance(data.get("spans"), list):
+                envelope_trace_id = _envelope_trace_id(trace)
                 for span in data["spans"]:
-                    if isinstance(span, dict):
-                        records.append(span)
-                    else:
+                    if not isinstance(span, dict):
                         raise VendorTraceFormatError("MLflow spans must be objects")
+                    records.append(_with_envelope_trace_id(span, envelope_trace_id))
                 continue
             # Fallback: trace itself may already be a span-shaped record
             if any(
@@ -590,9 +636,10 @@ def _mlflow_records(payload: JsonValue) -> tuple[JsonObject, ...]:
                 continue
             # Also handle data being a flat span list under data directly
             if isinstance(trace.get("data"), list):
+                envelope_trace_id = _envelope_trace_id(trace)
                 for span in trace["data"]:
                     if isinstance(span, dict):
-                        records.append(span)
+                        records.append(_with_envelope_trace_id(span, envelope_trace_id))
                 continue
             raise VendorTraceFormatError("MLflow trace envelope needs data.spans or a span record")
         return tuple(records)
@@ -600,7 +647,27 @@ def _mlflow_records(payload: JsonValue) -> tuple[JsonObject, ...]:
         data = payload["data"]
         spans = data.get("spans")
         if isinstance(spans, list):
-            return tuple(span for span in spans if isinstance(span, dict))
+            envelope_trace_id = _envelope_trace_id(payload)
+            return tuple(
+                _with_envelope_trace_id(span, envelope_trace_id)
+                for span in spans
+                if isinstance(span, dict)
+            )
+    # Single trace envelope without the outer ``traces`` wrapper.
+    if isinstance(payload, dict) and "info" in payload and "data" in payload:
+        info = payload.get("info")
+        data = payload.get("data")
+        if (
+            isinstance(info, dict)
+            and isinstance(data, dict)
+            and isinstance(data.get("spans"), list)
+        ):
+            envelope_trace_id = _envelope_trace_id(payload)
+            return tuple(
+                _with_envelope_trace_id(span, envelope_trace_id)
+                for span in data["spans"]
+                if isinstance(span, dict)
+            )
     # Fallback to strict wrapper flattening for flat span arrays, spans envelopes, JSONL.
     return record_flattener(
         vendor=VENDOR,

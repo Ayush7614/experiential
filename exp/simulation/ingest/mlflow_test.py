@@ -187,6 +187,58 @@ def test_load_mlflow_file_accepts_trace_envelope_wrapper(tmp_path: Path) -> None
     assert result.traces[0].spans[0].attributes["gen_ai.request.model"] == "gpt-4o-mini"
 
 
+def test_load_mlflow_file_envelope_trace_id_propagates_to_child_spans(
+    tmp_path: Path,
+) -> None:
+    """Child spans without a trace_id inherit ``info.trace_id`` from the envelope."""
+    # MLflow trace-search shapes identify the trace only at the envelope level;
+    # valid child spans that omit their own trace_id must not be dropped.
+    child_without_trace = {
+        "span_id": "span-7-no-trace",
+        "name": "chat",
+        "span_type": "LLM",
+        "start_time_ns": 1_700_000_000_000_000_000,
+        "end_time_ns": 1_700_000_001_000_000_000,
+        "inputs": {"messages": [{"role": "user", "content": "hello envelope"}]},
+        "outputs": {"content": "hi envelope"},
+        "attributes": {"llm.request.model": "gpt-4o", "llm.system": "openai"},
+    }
+    path = tmp_path / "mlflow.json"
+    path.write_text(
+        json.dumps(
+            {
+                "traces": [
+                    {
+                        "info": {"trace_id": "trace-envelope-1"},
+                        "data": {"spans": [child_without_trace]},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = MLFLOW_SOURCE.load(path)
+
+    assert result.issues == ()
+    assert len(result.traces) == 1
+    assert result.traces[0].task == "hello envelope"
+    # Also verify single-trace envelope shape without the outer ``traces`` wrapper.
+    single_envelope = tmp_path / "mlflow_single.json"
+    single_envelope.write_text(
+        json.dumps(
+            {
+                "info": {"trace_id": "trace-single-1"},
+                "data": {"spans": [child_without_trace]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    single_result = MLFLOW_SOURCE.load(single_envelope)
+    assert len(single_result.traces) == 1
+    assert single_result.traces[0].task == "hello envelope"
+
+
 def test_load_mlflow_file_accepts_jsonl(tmp_path: Path) -> None:
     """JSONL with one span per line is supported."""
     path = tmp_path / "mlflow.jsonl"

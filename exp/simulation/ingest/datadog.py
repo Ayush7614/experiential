@@ -318,6 +318,9 @@ def _identity_fields(span: JsonObject, llmobs: JsonObject) -> JsonObject:
 def _io(span: JsonObject, llmobs: JsonObject, which: str) -> JsonValue | None:
     """Read the declared Datadog span input or output.
 
+    Datadog wraps scalar payloads as ``{"value": ...}``; the wrapper is removed
+    so tool arguments, results, and completion text keep their declared shape.
+
     Args:
         span: Datadog span record.
         llmobs: Decoded LLM Observability payload.
@@ -330,18 +333,32 @@ def _io(span: JsonObject, llmobs: JsonObject, which: str) -> JsonValue | None:
     if isinstance(meta, dict):
         value = meta.get(which)
         if value is not None:
-            return value
+            return _unwrap(value)
     for key in (which, f"{which}s"):
         value = json_value(span.get(key))
         if value is not None:
-            return value
+            return _unwrap(value)
     attributes = _attributes(span)
     for key in (which, f"{which}s", f"{which}.messages", f"{which}_messages"):
         if key in attributes:
             value = json_value(attributes[key])
             if value is not None:
-                return value
+                return _unwrap(value)
     return None
+
+
+def _unwrap(value: JsonValue | None) -> JsonValue | None:
+    """Remove the Datadog scalar ``{"value": ...}`` wrapper, when present.
+
+    Args:
+        value: Decoded span input or output.
+
+    Returns:
+        The wrapped payload, or the value unchanged when it is not a wrapper.
+    """
+    if isinstance(value, dict) and set(value) == {"value"}:
+        return json_value(value["value"])
+    return value
 
 
 def _input_messages(inputs: JsonValue | None) -> JsonValue | None:

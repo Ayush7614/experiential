@@ -148,6 +148,13 @@ def test_load_datadog_file_tool_result_is_paired_with_requesting_call(tmp_path: 
     tool_names = [span.attributes.get("gen_ai.tool.name") for span in result.traces[0].spans]
     assert "lookup_order" in tool_names
     assert len(result.traces[0].spans) == 2
+    tool_span = next(
+        span
+        for span in result.traces[0].spans
+        if span.attributes.get("gen_ai.tool.name") == "lookup_order"
+    )
+    assert json.loads(str(tool_span.attributes["gen_ai.tool.call.arguments"])) == {"order": "A1"}
+    assert tool_span.attributes["gen_ai.tool.message"] == "ships tomorrow"
 
 
 def test_load_datadog_file_ignores_orchestration_spans(tmp_path: Path) -> None:

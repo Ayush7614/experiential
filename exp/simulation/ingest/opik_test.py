@@ -236,6 +236,30 @@ def test_load_opik_file_accepts_sdk_serialized_shapes(tmp_path: Path) -> None:
     assert (usage.input_tokens, usage.output_tokens) == (12, 8)
 
 
+def test_load_opik_file_reports_typeless_record_as_exclusion(tmp_path: Path) -> None:
+    """A record with identity but no declared type is reported, not silently dropped."""
+    path = tmp_path / "opik.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "trace_id": "trace-1",
+                    "id": "span-typeless",
+                    "name": "chat",
+                    "start_time": "2026-09-04T12:00:00+00:00",
+                    "end_time": "2026-09-04T12:00:01+00:00",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = OPIK_SOURCE.load(path)
+
+    assert result.traces == ()
+    assert len(result.issues) == 1
+
+
 def test_opik_is_registered_as_canonical_source() -> None:
     """The Opik source is discoverable through the canonical source table."""
     assert "opik" in CANONICAL_TRACE_SOURCES

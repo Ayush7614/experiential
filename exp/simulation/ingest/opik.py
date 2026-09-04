@@ -31,6 +31,7 @@ from exp.simulation.ingest.vendor_observations import (
     declared_usage,
 )
 from exp.simulation.ingest.vendor_records import (
+    VendorTraceFormatError,
     first_text,
     first_user_text,
     json_text,
@@ -61,9 +62,13 @@ def _span_observation(span: JsonObject, ordinal: int) -> tuple[VendorObservation
         Declared observation, or nothing for orchestration-only span types.
 
     Raises:
-        VendorTraceFormatError: The span lacks identity, timing, or tool evidence.
+        VendorTraceFormatError: The span lacks a type, identity, timing, or tool
+            evidence.
     """
-    span_type = (first_text(span, ("type", "spanType")) or "").casefold()
+    raw_type = first_text(span, ("type", "spanType"))
+    if raw_type is None:
+        raise VendorTraceFormatError("Opik span declares no type")
+    span_type = raw_type.casefold()
     if span_type not in _MODEL_TYPES | _TOOL_TYPES:
         return ()
     source_trace_id = required_text(span.get("trace_id", span.get("traceId")), "Opik trace_id")

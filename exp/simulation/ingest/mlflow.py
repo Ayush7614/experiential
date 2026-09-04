@@ -26,11 +26,14 @@ a provider.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import JsonValue
 
 from exp.common.core.artifacts import JsonObject
 from exp.simulation.ingest.vendor_observations import (
     VendorObservation,
+    VendorTokenUsage,
     declared_completion_text,
     declared_error_message,
     declared_model_identity,
@@ -129,7 +132,7 @@ def _span_observation(span: JsonObject, ordinal: int) -> tuple[VendorObservation
                 tool_name=_tool_name(span, attributes),
                 tool_arguments=json_text(inputs),
                 tool_message=declared_completion_text(outputs),
-                tool_call_id=first_text(attributes, ("toolCallId", "tool_call_id", "tool_call_id")),
+                tool_call_id=first_text(attributes, ("toolCallId", "tool_call_id")),
                 failure_message=failure,
                 extensions=extensions,
             ),
@@ -387,7 +390,7 @@ def _tool_name(span: JsonObject, attributes: JsonObject) -> str:
     return required_text(None, "MLflow tool span name")
 
 
-def _interval(span: JsonObject) -> tuple[object, object]:
+def _interval(span: JsonObject) -> tuple[datetime, datetime]:
     """Read the source interval from MLflow nanosecond, millisecond, or ISO fields.
 
     Args:
@@ -464,10 +467,10 @@ def _interval(span: JsonObject) -> tuple[object, object]:
                     start_label="MLflow trace request_time",
                     end_label="MLflow trace end",
                 )
-    raise source_timestamp(None, "MLflow span startTime")
+    raise VendorTraceFormatError("MLflow span declares no readable start time")
 
 
-def _usage(attributes: JsonObject, span: JsonObject) -> object | None:
+def _usage(attributes: JsonObject, span: JsonObject) -> VendorTokenUsage | None:
     """Read declared token accounting from MLflow span attributes or the span itself.
 
     Args:

@@ -294,11 +294,17 @@ def test_load_mlflow_file_marks_failed_span(tmp_path: Path) -> None:
 def test_load_mlflow_file_preserves_usage_when_declared(tmp_path: Path) -> None:
     """Token accounting declared on LLM spans is retained on the model span."""
     span = _llm_span(span_id="span-usage")
-    assert isinstance(span["attributes"], dict)
-    span["attributes"].update({"gen_ai.usage.input_tokens": 10, "gen_ai.usage.output_tokens": 20})
-    # The shared declared_usage helper also reads prompt/completion tokens.
-    span["attributes"]["llm.usage.prompt_tokens"] = 10
-    span["attributes"]["llm.usage.completion_tokens"] = 20
+    attributes: dict[str, object] = {
+        "mlflow.spanType": "LLM",
+        "llm.request.model": "gpt-4o-mini",
+        "llm.system": "openai",
+        "gen_ai.usage.input_tokens": 10,
+        "gen_ai.usage.output_tokens": 20,
+        # The shared declared_usage helper also reads prompt/completion tokens.
+        "llm.usage.prompt_tokens": 10,
+        "llm.usage.completion_tokens": 20,
+    }
+    span["attributes"] = attributes
     path = tmp_path / "mlflow.json"
     path.write_text(json.dumps([span]), encoding="utf-8")
 

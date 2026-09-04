@@ -263,7 +263,10 @@ def test_permanently_hung_cleanup_returns_bounded_failure(tmp_path: Path) -> Non
     )
     rollout = _load_rollout(store, artifact_set.artifact_ids[0])
 
-    assert time.monotonic() - started < 1.0
+    # The bound proves an infinitely hung cleanup was interrupted, so it must
+    # tolerate loaded-runner overhead around the short 0.2s timer: fixture
+    # persistence and artifact writes already pushed one CI worker past 1.0s.
+    assert time.monotonic() - started < 5.0
     assert rollout.stop_reason == StopReason.MAXIMUM_TIME
     assert rollout.failure is not None
     assert rollout.failure.attribution is not None

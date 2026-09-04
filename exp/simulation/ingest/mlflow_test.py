@@ -362,3 +362,68 @@ def test_load_mlflow_file_camelcase_keys(tmp_path: Path) -> None:
 
     assert len(result.traces) == 1
     assert result.traces[0].task == "hello"
+
+
+def test_load_mlflow_file_accepts_real_server_export_shape(tmp_path: Path) -> None:
+    """Server exports use unix_nano timing, JSON-encoded attributes, and OTel status."""
+    start_ns = 1_788_512_428_260_757_000
+    tool_span = {
+        "trace_id": "trace-real",
+        "span_id": "span-tool",
+        "parent_span_id": "span-root",
+        "name": "lookup_order",
+        "start_time_unix_nano": start_ns,
+        "end_time_unix_nano": start_ns + 1_000_000,
+        "status": {"code": "STATUS_CODE_OK", "message": ""},
+        "attributes": {
+            "mlflow.spanType": '"TOOL"',
+            "mlflow.spanInputs": '{"order": "A1"}',
+            "mlflow.spanOutputs": '"ships tomorrow"',
+        },
+    }
+    model_span = {
+        "trace_id": "trace-real",
+        "span_id": "span-llm",
+        "parent_span_id": "span-root",
+        "name": "answer",
+        "start_time_unix_nano": start_ns,
+        "end_time_unix_nano": start_ns + 2_000_000,
+        "status": {"code": "STATUS_CODE_OK", "message": ""},
+        "attributes": {
+            "mlflow.spanType": '"LLM"',
+            "llm.request.model": '"gpt-4o-mini"',
+            "llm.system": '"openai"',
+            "mlflow.spanInputs": (
+                '{"messages": [{"role": "user", "content": "Where is my order?"}]}'
+            ),
+            "mlflow.spanOutputs": '{"content": "It ships tomorrow."}',
+        },
+    }
+    root_span = {
+        "trace_id": "trace-real",
+        "span_id": "span-root",
+        "name": "chat",
+        "start_time_unix_nano": start_ns,
+        "end_time_unix_nano": start_ns + 3_000_000,
+        "status": {"code": "STATUS_CODE_OK", "message": ""},
+        "attributes": {"mlflow.spanType": '"UNKNOWN"'},
+    }
+    path = tmp_path / "mlflow.json"
+    path.write_text(json.dumps([root_span, tool_span, model_span]), encoding="utf-8")
+
+    result = MLFLOW_SOURCE.load(path)
+
+    assert result.issues == ()
+    assert len(result.traces) == 1
+    assert result.traces[0].task == "Where is my order?"
+    assert len(result.traces[0].spans) == 2
+    tool_names = [span.attributes.get("gen_ai.tool.name") for span in result.traces[0].spans]
+    assert "lookup_order" in tool_names
+    failed = [span for span in result.traces[0].spans if span.failure is not None]
+    assert failed == []
+    models = [
+        span.attributes["gen_ai.request.model"]
+        for span in result.traces[0].spans
+        if "gen_ai.request.model" in span.attributes
+    ]
+    assert models == ["gpt-4o-mini"]

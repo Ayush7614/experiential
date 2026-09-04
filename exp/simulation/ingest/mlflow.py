@@ -2,11 +2,11 @@
 
 MLflow exports agent runs as spans grouped by a trace identifier. A span declares
 ``trace_id`` (or ``traceId``), ``span_id`` (or ``spanId``), ``parent_id``, ``name``,
-``span_type`` (or ``type``), ``start_time``/``start_time_ns`` and ``end_time``, plus
-``inputs``, ``outputs``, ``attributes``, and ``status``. Exports arrive as a span
-array, a ``traces`` or ``spans`` envelope, or JSONL with one span per line. A trace
-object that carries ``info.trace_id`` and ``data.spans`` is also supported because
-``GET /mlflow/traces/search`` returns that shape.
+``span_type`` (or ``type``), ``start_time_unix_nano``/``start_time_ns``/``start_time``
+and ``end_time``, plus ``inputs``, ``outputs``, ``attributes``, and ``status``.
+Exports arrive as a span array, a ``traces`` or ``spans`` envelope, or JSONL with
+one span per line. A trace object that carries ``info.trace_id`` and ``data.spans``
+is also supported because ``GET /mlflow/traces/search`` returns that shape.
 
 Span types map to canonical evidence by what they observe:
 
@@ -195,15 +195,15 @@ def _span_type(span: JsonObject) -> str:
     attributes = span.get("attributes")
     attr_obj: JsonObject = attributes if isinstance(attributes, dict) else {}
     for key in ("mlflow.spanType", "span_type", "spanType", "type"):
-        value = span.get(key)
+        value = json_value(span.get(key))
         if isinstance(value, str) and value.strip():
             return value.strip().casefold()
-        attr_value = attr_obj.get(key)
+        attr_value = json_value(attr_obj.get(key))
         if isinstance(attr_value, str) and attr_value.strip():
             return attr_value.strip().casefold()
     # Also check nested attributes like attributes.spanType
     for key in ("mlflow.spanType", "span_type"):
-        attr_value = attr_obj.get(key)
+        attr_value = json_value(attr_obj.get(key))
         if isinstance(attr_value, str) and attr_value.strip():
             return attr_value.strip().casefold()
     return ""
@@ -288,6 +288,11 @@ def _parent_id(span: JsonObject) -> str | None:
 def _attributes(span: JsonObject) -> JsonObject:
     """Return the MLflow span attributes object.
 
+    The server JSON-encodes attribute values one extra layer (so the model reads
+    ``'"gpt-4o-mini"'`` rather than ``'gpt-4o-mini"'``); each value is decoded so
+    downstream readers see the declared text. Values that are not JSON-encoded
+    text are left unchanged.
+
     Args:
         span: MLflow span record.
 
@@ -295,10 +300,17 @@ def _attributes(span: JsonObject) -> JsonObject:
         Attribute mapping, empty when the span declares none.
     """
     value = span.get("attributes")
-    if isinstance(value, dict):
-        return value
-    # Some exports carry attributes flat on the span.
-    return {}
+    if not isinstance(value, dict):
+        # Some exports carry attributes flat on the span.
+        return {}
+    decoded: JsonObject = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        text = json_value(item)
+        if text is not None:
+            decoded[key] = text
+    return decoded
 
 
 def _inputs(span: JsonObject, attributes: JsonObject) -> JsonValue | None:
@@ -380,7 +392,7 @@ def _tool_name(span: JsonObject, attributes: JsonObject) -> str:
     Raises:
         VendorTraceFormatError: The span declares no tool name.
     """
-    for key in ("toolName", "tool_name", "functionName", "name"):
+    for key in ("toolName", "tool_name", "functionName", "mlflow.spanFunctionName", "name"):
         value = attributes.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -402,11 +414,12 @@ def _interval(span: JsonObject) -> tuple[datetime, datetime]:
     Raises:
         VendorTraceFormatError: The span declares no readable start time.
     """
-    # MLflow commonly uses ``start_time_ns`` / ``end_time_ns`` (nanoseconds since epoch)
-    # or ``start_time`` / ``end_time`` (milliseconds or ISO). Try nanoseconds first
-    # by converting to seconds for the shared timestamp helper.
-    ns_start = span.get("start_time_ns", span.get("startTimeNs"))
-    ns_end = span.get("end_time_ns", span.get("endTimeNs"))
+    # MLflow commonly uses nanosecond epoch fields (``start_time_unix_nano`` in
+    # server exports, ``start_time_ns`` elsewhere) or ``start_time`` / ``end_time``
+    # (milliseconds or ISO). Try nanoseconds first by converting to seconds for
+    # the shared timestamp helper.
+    ns_start = span.get("start_time_ns", span.get("startTimeNs", span.get("start_time_unix_nano")))
+    ns_end = span.get("end_time_ns", span.get("endTimeNs", span.get("end_time_unix_nano")))
     if isinstance(ns_start, int | float):
         # Convert nanoseconds to seconds for source_timestamp epoch handling.
         start_seconds = float(ns_start) / 1_000_000_000
@@ -509,6 +522,9 @@ def _failure_message(span: JsonObject, attributes: JsonObject) -> str | None:
     status = span.get("status")
     if isinstance(status, dict):
         code = str(status.get("status_code") or status.get("code") or "").upper()
+        # Server exports use OpenTelemetry codes (``STATUS_CODE_OK``); strip the
+        # prefix before comparing so healthy spans are not marked failed.
+        code = code.removeprefix("STATUS_CODE_")
         if code and code not in {"OK", "SUCCESS", "UNSET"}:
             return (
                 declared_error_message(
@@ -521,7 +537,7 @@ def _failure_message(span: JsonObject, attributes: JsonObject) -> str | None:
             if key in status and isinstance(status[key], str) and status[key].strip():
                 return status[key].strip()
     elif isinstance(status, str) and status.strip():
-        if status.strip().upper() not in {"OK", "SUCCESS", "UNSET"}:
+        if status.strip().upper().removeprefix("STATUS_CODE_") not in {"OK", "SUCCESS", "UNSET"}:
             return declared_error_message(span, keys=_ERROR_KEYS, label="MLflow span") or (
                 declared_error_message(attributes, keys=_ERROR_KEYS, label="MLflow span")
                 or f"MLflow span failed with status {status}"
